@@ -237,7 +237,7 @@ class ModelHandler:
                 prompt,
                 image
             ])
-            
+            #time.sleep(1)
             # Extract the response text
             response_text = response.text
             

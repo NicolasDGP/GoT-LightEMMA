@@ -1,18 +1,18 @@
 # API Keys
 api_keys:
-  openai: "your-openai-api-key"  # GPT models
+  openai: "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"  # GPT models
   anthropic: "your-anthropic-api-key"  # Claude models
-  gemini: "your-gemini-api-key"  # Gemini models
-  huggingface: "your-huggingface-token"  # To download models from HuggingFace
+  gemini: "AIzaSyAz9XR7m0O8V94Yp_-IuWpsqCF0puOV3kM"  # Gemini models
+  huggingface: "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"  # To download models from HuggingFace
 
 model_path:
-  huggingface: "path/to/store/huggingface/models"  # directory to store downloaded models
+  huggingface: "models"  # directory to store downloaded models
 
 # Dataset
 data:
-  root: "path/to/nuscenes"  # Path to nuScenes dataset
+  root: "/Users/nicolas/Desktop/LightEMMA/mininu"  # Path to nuScenes dataset
   version: "v1.0-mini"  # Dataset version (v1.0-mini, v1.0-trainval, v1.0-test)
-  results: "results"  # Local directory to store results
+  results: "/Users/nicolas/Desktop/LightEMMA/results"  # Local directory to store results
 
 # Prediction Parameters (do not change)
 prediction:

@@ -1,9 +1,72 @@
 # predict.py (minimal, GoT-enabled)
-import os, argparse, datetime
+import os, argparse, datetime, time  # >>> MOD: added time for sleep
 from nuscenes import NuScenes
 from utils import *
 from vlm import ModelHandler
 from got_driver import GoTRunner
+
+# >>> MOD: rate-limit error import / fallback
+try:
+    # If you're using Vertex or google-api-core, this will work:
+    from google.api_core.exceptions import ResourceExhausted as RateLimitError
+except Exception:
+    # Fallback: user should replace this with their actual 429 exception type
+    class RateLimitError(Exception):
+        """Fallback RateLimitError; replace with your Gemini 429 exception."""
+        pass
+
+# >>> MOD: retry configuration + helper
+MAX_RETRIES = 5
+
+def _get_retry_delay_seconds(e, default_seconds: float = 15.0) -> float:
+    """
+    Try to extract retry_delay.seconds from the Gemini error.
+    Falls back to default_seconds if not present.
+    """
+    retry_delay = getattr(e, "retry_delay", None)
+
+    # Common pattern: retry_delay is a timedelta-like object with .seconds or total_seconds()
+    if retry_delay is not None:
+        seconds = getattr(retry_delay, "seconds", None)
+        if seconds is not None:
+            return float(seconds)
+        # try total_seconds()
+        total_seconds = getattr(retry_delay, "total_seconds", None)
+        if callable(total_seconds):
+            return float(total_seconds())
+        # if it's already a number
+        if isinstance(retry_delay, (int, float)):
+            return float(retry_delay)
+
+    # Fallback if nothing useful is found
+    return float(default_seconds)
+
+def call_with_retry(fn, *args, **kwargs):
+    """
+    Call an LLM function with retries on 429 / rate limit.
+
+    Expects Gemini-style errors where e.retry_delay is present.
+    Adjust RateLimitError and _get_retry_delay_seconds if your SDK differs.
+    """
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+
+        except RateLimitError as e:
+            delay = _get_retry_delay_seconds(e)
+            delay += 1.0  # small safety margin
+            print(
+                f"[RATE LIMIT] attempt {attempt}/{MAX_RETRIES} – "
+                f"sleeping {delay:.1f}s before retrying…"
+            )
+            time.sleep(delay)
+
+        except Exception:
+            # Non-rate-limit errors bubble up immediately
+            raise
+
+    raise RuntimeError(f"Failed after {MAX_RETRIES} retries due to rate limiting.")
+
 
 # ---- CLI ----
 def parse_args():
@@ -126,21 +189,55 @@ def run_prediction():
 
                 # ---- reasoning ----
                 if got:
-                    g = got.run_frame(image_path=image, prev_speed=prev_v, prev_curv=prev_k)
+                    # >>> MOD: wrap GoT call with retry for 429 / rate limit
+                    g = call_with_retry(
+                        got.run_frame,
+                        image_path=image,
+                        prev_speed=prev_v,
+                        prev_curv=prev_k,
+                    )
                     pred_actions_str = g["best_actions_str"]
                     scene_desc = "Graph-of-Thought"
                     driving_intent = "Selected via scoring"
-                    tok_scene = {"input": g["token_usage"]["scene_prompt"]["input"], "output": g["token_usage"]["scene_prompt"]["output"]}
-                    tok_intent = {"input": g["token_usage"]["intent_prompt"]["input"], "output": g["token_usage"]["intent_prompt"]["output"]}
-                    tok_waypt = {"input": g["token_usage"]["waypoint_prompt"]["input"], "output": g["token_usage"]["waypoint_prompt"]["output"]}
-                    t_scene, t_intent, t_waypt = g["time_usage"]["scene_prompt"], g["time_usage"]["intent_prompt"], g["time_usage"]["waypoint_prompt"]
+                    tok_scene = {
+                        "input": g["token_usage"]["scene_prompt"]["input"],
+                        "output": g["token_usage"]["scene_prompt"]["output"]
+                    }
+                    tok_intent = {
+                        "input": g["token_usage"]["intent_prompt"]["input"],
+                        "output": g["token_usage"]["intent_prompt"]["output"]
+                    }
+                    tok_waypt = {
+                        "input": g["token_usage"]["waypoint_prompt"]["input"],
+                        "output": g["token_usage"]["waypoint_prompt"]["output"]
+                    }
+                    t_scene = g["time_usage"]["scene_prompt"]
+                    t_intent = g["time_usage"]["intent_prompt"]
+                    t_waypt = g["time_usage"]["waypoint_prompt"]
+
                 else:
                     sp = build_scene_prompt()
-                    scene_desc, sc_tok, sc_t = mh.get_response(prompt=sp, image_path=image)
+                    # >>> MOD: wrap baseline LLM calls with retry
+                    scene_desc, sc_tok, sc_t = call_with_retry(
+                        mh.get_response,
+                        prompt=sp,
+                        image_path=image,
+                    )
+
                     ip = build_intent_prompt(scene_desc, prev_v, prev_k)
-                    driving_intent, in_tok, in_t = mh.get_response(prompt=ip, image_path=image)
+                    driving_intent, in_tok, in_t = call_with_retry(
+                        mh.get_response,
+                        prompt=ip,
+                        image_path=image,
+                    )
+
                     wp = build_waypoint_prompt(scene_desc, prev_v, prev_k, driving_intent)
-                    pred_actions_str, wp_tok, wp_t = mh.get_response(prompt=wp, image_path=image)
+                    pred_actions_str, wp_tok, wp_t = call_with_retry(
+                        mh.get_response,
+                        prompt=wp,
+                        image_path=image,
+                    )
+
                     tok_scene, tok_intent, tok_waypt = sc_tok, in_tok, wp_tok
                     t_scene, t_intent, t_waypt = sc_t, in_t, wp_t
 
@@ -182,6 +279,11 @@ def run_prediction():
                     }
                 }
                 data["frames"].append(frame)
+
+                # >>> MOD (optional): coarse throttle per frame (can be tuned/removed)
+                # If you know how many LLM calls per frame, you can adjust this.
+                # For 5 req/min free tier and ~3 calls/frame, ~12–20s is reasonable.
+                # time.sleep(12)
 
             except Exception as e:
                 print(f"Error frame {i} in {name}: {e}")
